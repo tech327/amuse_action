@@ -91,17 +91,28 @@ def extract_date_sql_from_query(user_query: str) -> str:
 # --- GPT SQL FALLBACK ---
 def generate_sql_from_gpt(user_query: str) -> str:
     prompt = f"""
-You are an AI that converts natural language into MySQL SELECT queries.
-The table is `events` with columns: id, title, address, lat, long, date_time, about, category_id, rating, user_id, created_at, link, visible_date, recurring, end_date, weekdays, dates, all_time, selected_weeks.
-Use STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i') for date comparisons.
-Category mapping:
-• music → 6
-• sports → 3
-• art → 4
-• education → 5
-• tech → 2
-• food → 7
-Only return a SELECT statement with LIMIT 10.
+ You are an AI that converts natural language questions into MySQL SELECT queries.
+
+The database has a table named `events` with the following columns:
+id, title, address, lat, long, date_time, about, category_id, rating, user_id, created_at, link, visible_date, recurring, end_date, weekdays, dates, all_time, selected_weeks.
+
+Formatting rules:
+- `date_time` is a string like '20/06/2025,20 : 30'
+- Use STR_TO_DATE(date_time, '%d/%m/%Y,%H : %i') for comparisons
+- Use:
+    STR_TO_DATE(date_time, '%d/%m/%Y,%H : %i') >= ...
+    AND STR_TO_DATE(date_time, '%d/%m/%Y,%H : %i') < ...
+- Category mappings (category_id):
+    • music → 6
+    • sports → 3
+    • art → 4
+    • education → 5
+    • tech → 2
+    • food → 7
+
+Return only a valid SELECT query.
+No markdown, no comments.
+Always use LIMIT 10.
 User query: "{user_query}"
 """
     res = client.chat.completions.create(
