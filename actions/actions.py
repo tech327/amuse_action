@@ -1,6 +1,7 @@
 from typing import Any, Text, Dict, List
 from rasa_sdk import Action, Tracker
-from rasa_sdk.executor import CollectingDispatcher, ActionExecutor
+from rasa_sdk.executor import CollectingDispatcher
+from rasa_sdk.events import UserUtteranceReverted
 import mysql.connector
 import os
 import re
@@ -8,29 +9,25 @@ from datetime import datetime
 from dateparser import parse as parse_date
 from dotenv import load_dotenv
 from openai import OpenAI
-from rasa_sdk.events import UserUtteranceReverted
 
 # Load environment variables
 load_dotenv()
+
+# OpenAI setup
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise EnvironmentError("OPENAI_API_KEY not set in environment variables.")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# DB Connection
-try:
-    db_config = {
-        "host": os.getenv("DB_HOST"),
-        "user": os.getenv("DB_USER"),
-        "password": os.getenv("DB_PASSWORD"),
-        "database": os.getenv("DB_NAME"),
-        "port": 3306
-    }
-    db = mysql.connector.connect(**db_config)
-    cursor = db.cursor(dictionary=True)
-except mysql.connector.Error as e:
-    raise ConnectionError(f"Database connection failed: {e}")
+# Get DB config
+def get_db_connection():
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME"),
+        port=3306
+    )
 
 # --- DATE SQL PARSER ---
 def extract_date_sql_from_query(user_query: str) -> str:
@@ -39,6 +36,7 @@ def extract_date_sql_from_query(user_query: str) -> str:
     current_year = today.year
     base_sql = "SELECT * FROM events WHERE"
 
+    # Range: "between 1 June and 10 June"
     date_range = re.findall(r"(?:between|from)\s+(.*?)\s+(?:and|to)\s+(.*)", user_query)
     if date_range:
         start_str, end_str = date_range[0]
@@ -50,6 +48,7 @@ def extract_date_sql_from_query(user_query: str) -> str:
                 f"BETWEEN '{start_date.date()}' AND '{end_date.date()}' LIMIT 10"
             )
 
+    # Specific date: "15 June"
     single_date = re.search(r"\d{1,2}\s+\w+|\w+\s+\d{1,2}", user_query)
     if single_date:
         parsed_date = parse_date(single_date.group() + f" {current_year}")
@@ -59,12 +58,14 @@ def extract_date_sql_from_query(user_query: str) -> str:
                 f"'{parsed_date.date()}' LIMIT 10"
             )
 
+    # This month
     if "this month" in user_query:
         return (
             f"{base_sql} MONTH(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {today.month} "
             f"AND YEAR(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {today.year} LIMIT 10"
         )
 
+    # Next month
     if "next month" in user_query:
         next_month = (today.month % 12) + 1
         next_year = today.year + (1 if next_month == 1 else 0)
@@ -73,12 +74,12 @@ def extract_date_sql_from_query(user_query: str) -> str:
             f"AND YEAR(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {next_year} LIMIT 10"
         )
 
+    # Specific months
     month_map = {
         "january": 1, "february": 2, "march": 3, "april": 4,
         "may": 5, "june": 6, "july": 7, "august": 8,
         "september": 9, "october": 10, "november": 11, "december": 12
     }
-
     for month_name, month_num in month_map.items():
         if month_name in user_query:
             return (
@@ -91,7 +92,7 @@ def extract_date_sql_from_query(user_query: str) -> str:
 # --- GPT SQL FALLBACK ---
 def generate_sql_from_gpt(user_query: str) -> str:
     prompt = f"""
- You are an AI that converts natural language questions into MySQL SELECT queries.
+    You are an AI that converts natural language questions into MySQL SELECT queries.
 
 The database has a table named `events` with the following columns:
 id, title, address, lat, long, date_time, about, category_id, rating, user_id, created_at, link, visible_date, recurring, end_date, weekdays, dates, all_time, selected_weeks.
@@ -113,6 +114,7 @@ Formatting rules:
 Return only a valid SELECT query.
 No markdown, no comments.
 Always use LIMIT 10.
+
 User query: "{user_query}"
 """
     res = client.chat.completions.create(
@@ -120,13 +122,12 @@ User query: "{user_query}"
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
-    sql = res.choices[0].message.content.strip().replace("```sql", "").replace("```", "")
-    return sql
+    return res.choices[0].message.content.strip().replace("```sql", "").replace("```", "")
 
-# --- FORMAT EVENTS FOR DISPLAY ---
+# --- FORMAT EVENTS ---
 def format_events(events: List[Dict]) -> str:
     if not events:
-        return "no matching events."
+        return "No matching events found."
 
     formatted = []
     for i, event in enumerate(events, start=1):
@@ -140,10 +141,9 @@ def format_events(events: List[Dict]) -> str:
             f"• *About:* {event.get('about', 'N/A')}\n"
         )
         formatted.append(block)
-
     return "\n\n".join(formatted)
 
-# --- ACTION TO FETCH EVENTS ---
+# --- ACTION: Fetch Events ---
 class ActionFetchEventData(Action):
     def name(self) -> Text:
         return "action_fetch_event_data"
@@ -155,6 +155,9 @@ class ActionFetchEventData(Action):
         user_query = tracker.latest_message.get("text")
 
         try:
+            db = get_db_connection()
+            cursor = db.cursor(dictionary=True)
+
             sql = extract_date_sql_from_query(user_query)
             if not sql:
                 sql = generate_sql_from_gpt(user_query)
@@ -166,10 +169,17 @@ class ActionFetchEventData(Action):
         except Exception as e:
             output = f"⚠️ Error: {str(e)}"
 
+        finally:
+            try:
+                cursor.close()
+                db.close()
+            except:
+                pass
+
         dispatcher.utter_message(text=output)
         return []
 
-# --- GENERAL EVENT FAQ HANDLER ---
+# --- ACTION: General Event Info ---
 class ActionGeneralInfo(Action):
     def name(self) -> Text:
         return "action_general_info"
@@ -186,7 +196,6 @@ Answer clearly in 3–4 lines only.
 
 Question: "{user_query}"
 """
-
         try:
             res = client.chat.completions.create(
                 model="gpt-4",
@@ -200,24 +209,22 @@ Question: "{user_query}"
         dispatcher.utter_message(text=response)
         return []
 
-# --- FALLBACK HANDLER ---
+# --- FALLBACK ---
 class ActionFallback(Action):
     def name(self) -> Text:
         return "action_fallback"
 
     def run(self, dispatcher: CollectingDispatcher,
-            tracker: 'Tracker',
+            tracker: Tracker,
             domain: Dict[Text, Any]) -> List[Dict[Text, Any]]:
 
         dispatcher.utter_message(text=(
-            " I'm sorry, I didn't understand that. "
+            "I'm sorry, I didn't understand that. "
             "Could you rephrase it?\n\n"
             "Try something like:\n• Show events happening in June\n"
             "• Events between 5th and 10th July\n• Music shows next month 🎶"
         ))
         return [UserUtteranceReverted()]
-
-# --- REGISTER ACTIONS & RUN SERVER ---
 if __name__ == "__main__":
     executor = ActionExecutor()
     executor.register_package(__name__)
