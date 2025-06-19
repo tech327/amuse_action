@@ -1,6 +1,6 @@
 from typing import Any, Text, Dict, List
 from rasa_sdk import Action, Tracker
-from rasa_sdk.executor import CollectingDispatcher
+from rasa_sdk.executor import CollectingDispatcher, ActionExecutor
 import mysql.connector
 import os
 import re
@@ -39,7 +39,6 @@ def extract_date_sql_from_query(user_query: str) -> str:
     current_year = today.year
     base_sql = "SELECT * FROM events WHERE"
 
-    # Handle range like: between 1 June and 10 June
     date_range = re.findall(r"(?:between|from)\s+(.*?)\s+(?:and|to)\s+(.*)", user_query)
     if date_range:
         start_str, end_str = date_range[0]
@@ -51,7 +50,6 @@ def extract_date_sql_from_query(user_query: str) -> str:
                 f"BETWEEN '{start_date.date()}' AND '{end_date.date()}' LIMIT 10"
             )
 
-    # Handle single date like: 15 June
     single_date = re.search(r"\d{1,2}\s+\w+|\w+\s+\d{1,2}", user_query)
     if single_date:
         parsed_date = parse_date(single_date.group() + f" {current_year}")
@@ -61,7 +59,6 @@ def extract_date_sql_from_query(user_query: str) -> str:
                 f"'{parsed_date.date()}' LIMIT 10"
             )
 
-    # Handle monthly queries
     if "this month" in user_query:
         return (
             f"{base_sql} MONTH(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {today.month} "
@@ -76,20 +73,10 @@ def extract_date_sql_from_query(user_query: str) -> str:
             f"AND YEAR(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {next_year} LIMIT 10"
         )
 
-    # Handle specific month names
     month_map = {
-        "january": 1,
-        "february": 2,
-        "march": 3,
-        "april": 4,
-        "may": 5,
-        "june": 6,
-        "july": 7,
-        "august": 8,
-        "september": 9,
-        "october": 10,
-        "november": 11,
-        "december": 12
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12
     }
 
     for month_name, month_num in month_map.items():
@@ -99,7 +86,8 @@ def extract_date_sql_from_query(user_query: str) -> str:
                 f"AND YEAR(STR_TO_DATE(date_time, '%d/%m/%Y,%H:%i')) = {today.year} LIMIT 10"
             )
 
-    return ""  # default fallback if no match
+    return ""
+
 # --- GPT SQL FALLBACK ---
 def generate_sql_from_gpt(user_query: str) -> str:
     prompt = f"""
@@ -201,10 +189,7 @@ Question: "{user_query}"
         dispatcher.utter_message(text=response)
         return []
 
-
-
-
-
+# --- FALLBACK HANDLER ---
 class ActionFallback(Action):
     def name(self) -> Text:
         return "action_fallback"
@@ -220,3 +205,9 @@ class ActionFallback(Action):
             "• Events between 5th and 10th July\n• Music shows next month 🎶"
         ))
         return [UserUtteranceReverted()]
+
+# --- REGISTER ACTIONS & RUN SERVER ---
+if __name__ == "__main__":
+    executor = ActionExecutor()
+    executor.register_package(__name__)
+    executor.run(port=8000)
