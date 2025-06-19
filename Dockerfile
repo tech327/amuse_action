@@ -4,4 +4,4 @@ COPY . /app
 USER root
 RUN pip install --no-cache-dir -r requirements.txt
 ENTRYPOINT []
-CMD ["python", "-m", "rasa_sdk", "--port", "8000"]
+CMD ["python", "-m", "rasa_sdk", "--port", "5055"]
