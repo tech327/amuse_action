@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: amuse-action
+    env: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    startCommand: python -m rasa_sdk --port 8000
